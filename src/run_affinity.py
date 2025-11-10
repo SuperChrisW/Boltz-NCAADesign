@@ -133,6 +133,5 @@ def pred_res_affinity_once(*, cfg, processed, feats, dict_out, model_struct, mod
             "affinity_probability_binary": out_aff["affinity_probability_binary"],
             "affinity_pred_value": out_aff["affinity_pred_value"],
         }
-        
-        break  # TODO: remove this
+
     return results

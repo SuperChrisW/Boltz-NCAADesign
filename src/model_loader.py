@@ -13,6 +13,9 @@ from boltz.main import (
     filter_inputs_structure, filter_inputs_affinity, BoltzProcessedInput,
 )
 from .config import RunConfig
+from pathlib import Path
+from typing import Optional
+from .template_constraints import LigandTemplateModule, LigandTemplateLoader
 
 def init_env(cfg: RunConfig):
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.cuda_visible_devices
@@ -77,3 +80,70 @@ def load_affinity_model(cfg: RunConfig, predict_args: dict, diff, pf, msa_args):
     )
     model.eval()
     return model
+
+def create_ligand_template_module(
+    token_z: int = 128,
+    template_dim: int = 128,
+    template_blocks: int = 2,
+    device: Optional[torch.device] = None,
+) -> LigandTemplateModule:
+    """
+    Create and initialize a ligand template module.
+
+    Parameters
+    ----------
+    token_z : int
+        Token pairwise embedding dimension (should match model's token_z).
+    template_dim : int
+        Template feature processing dimension.
+    template_blocks : int
+        Number of pairformer blocks for template processing.
+    device : torch.device, optional
+        Device to place the module on.
+
+    Returns
+    -------
+    LigandTemplateModule
+        Initialized ligand template module.
+    """
+    module = LigandTemplateModule(
+        token_z=token_z,
+        template_dim=template_dim,
+        template_blocks=template_blocks,
+    )
+    if device is not None:
+        module = module.to(device)
+    module.eval()
+    return module
+
+def load_template_coords(
+    template_path: Path,
+    template_dir: Optional[Path] = None,
+    protein_key: str = "protein_coords",
+    ligand_key: str = "ligand_coords",
+) -> dict:
+    """
+    Load template coordinates from .npz file.
+
+    Parameters
+    ----------
+    template_path : Path
+        Path to the template .npz file.
+    template_dir : Path, optional
+        Directory to resolve relative paths from.
+    protein_key : str
+        Key for protein coordinates in .npz file.
+    ligand_key : str
+        Key for ligand coordinates in .npz file.
+
+    Returns
+    -------
+    dict
+        Dictionary containing loaded coordinates and masks.
+    """
+    loader = LigandTemplateLoader(
+        template_dir=template_dir,
+        protein_key=protein_key,
+        ligand_key=ligand_key,
+    )
+    return loader.load_template(template_path)

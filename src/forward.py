@@ -1,9 +1,13 @@
 from __future__ import annotations
 import torch
+from typing import Optional
+from .template_constraints import LigandTemplateModule
 
 def trunk_forward(model, feats, *, recycling_steps: int, num_sampling_steps: int,
                   diffusion_samples: int, max_parallel_samples: int,
-                  run_confidence_sequentially: bool = True) -> dict:
+                  run_confidence_sequentially: bool = True,
+                  ligand_template_module: Optional[LigandTemplateModule] = None,
+                  reference_coords: Optional[dict] = None) -> dict:
     """Structure trunk + diffusion + confidence (logic unchanged)."""
     with torch.no_grad():
         s_inputs = model.input_embedder(feats)
@@ -29,6 +33,14 @@ def trunk_forward(model, feats, *, recycling_steps: int, num_sampling_steps: int
                 if model.use_templates:
                     tm = model.template_module._orig_mod if model.is_template_compiled and not model.training else model.template_module
                     z = z + tm(z, feats, pair_mask, use_kernels=model.use_kernels)
+
+                # Add ligand template constraints if provided
+                if ligand_template_module is not None:
+                    z = z + ligand_template_module(
+                        z, feats, pair_mask,
+                        reference_coords=reference_coords,
+                        use_kernels=model.use_kernels if hasattr(model, 'use_kernels') else False,
+                    )
 
                 mm = model.msa_module._orig_mod if model.is_msa_compiled and not model.training else model.msa_module
                 z = z + mm(z, s_inputs, feats, use_kernels=model.use_kernels)

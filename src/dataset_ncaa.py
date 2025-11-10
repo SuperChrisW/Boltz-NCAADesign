@@ -98,19 +98,6 @@ class NCAA_PredictionDataset(PredictionDataset):
         )
 
         features["record"] = record
-
-        # Save features for future comparison
-        import os
-        import pickle
-        save_features_path = self.target_dir / "features" / f"{record.id}_test.pkl"
-        os.makedirs(os.path.dirname(save_features_path), exist_ok=True)
-        save_data = dict(features)  # Make a shallow copy
-        # Features might include non-serializable data, so filter them if needed
-        try:
-            with open(save_features_path, "ab") as f:
-                pickle.dump(save_data, f)
-        except Exception as save_exc:
-            print(f"Warning: Could not save features for {record.id}: {save_exc}")
         return features
 
 def make_ncaa_loader(dataset: NCAA_PredictionDataset, batch_size: int = 1, num_workers: int = 2) -> DataLoader:

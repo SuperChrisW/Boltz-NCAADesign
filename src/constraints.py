@@ -69,20 +69,17 @@ def generate_contact_constraints_token_based(
     atom_to_local_lig = np.full(n_atoms, -1, dtype=int)
 
     # Fill with local indices: for token t (local), mark all its atoms with t
-    glob_token = 0
     for local_t, tok in enumerate(rec_tokens):
         start = int(tok["atom_idx"])
         num = int(tok["atom_num"])
         if num > 0:
-            atom_to_local_rec[start:start+num] = glob_token
-        glob_token += 1
+            atom_to_local_rec[start:start+num] = local_t
 
     for local_t, tok in enumerate(lig_tokens):
         start = int(tok["atom_idx"])
         num = int(tok["atom_num"])
         if num > 0:
-            atom_to_local_lig[start:start+num] = glob_token
-        glob_token += 1
+            atom_to_local_lig[start:start+num] = local_t
 
     # ---- 4) Find atom–atom neighbors within max_distance
     close_pairs_token = set()
@@ -118,5 +115,6 @@ def generate_contact_constraints_token_based(
     print(f"  - Receptor tokens: {len(rec_tokens)} (atoms: {len(rec_atoms)})")
     print(f"  - Ligand tokens:   {len(lig_tokens)} (atoms: {len(lig_atoms)})")
     print(f"  - Max distance:    {max_distance:.2f} Å")
+    print(f"  - Contact:    {contact_constraints}")
 
     return contact_constraints
