@@ -1,0 +1,20 @@
+version: 1  # Optional, defaults to 1
+sequences:
+  - protein:
+      id: A
+      sequence: GITNINCSGHIWVEPATIFKMGMNISIYCQAAIKNCQPRKLHFYKNGIKERFQITRINKTTARLWYKNFLEPHASMYCTAECPKHFQETLICGKDISSG
+      msa: empty
+  - ligand:
+      id: B
+      ccd: "ASP"
+      #smiles: 'N[C@@H](Cc1ccc(O)cc1)C(=O)O'
+#constraints:
+#  - contact:
+#      token1: [A, 77]
+#      token2: [B, OD1]
+#      max_distance: 3.5
+#      force: false
+
+properties:
+  - affinity:
+      binder: B

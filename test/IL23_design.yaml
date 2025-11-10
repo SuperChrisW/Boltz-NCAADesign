@@ -1,0 +1,10 @@
+version: 1  # Optional, defaults to 1
+sequences:
+  - protein:
+      id: A
+      sequence: GITNINCSGHIWVEPATIFKMGMNISIYCQAAIKNCQPRKLHFYKNGIKERFQITRINKTTARLWYKNFLEPHASMYCTAECPKHFQETLICGKDISSG
+      msa: empty
+  - protein:
+      id: B
+      sequence: NPEIDQQWEELRR
+      msa: empty
