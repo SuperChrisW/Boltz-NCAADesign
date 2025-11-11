@@ -49,8 +49,15 @@ class NCAA_PredictionDataset(PredictionDataset):
         self.max_atoms = max_atoms
         self.trunk_coords = trunk_coords
 
+    def __len__(self) -> int:
+        """Return the number of target residues to process."""
+        return len(self.target_res_idx) if self.target_res_idx is not None else 0
+
     def __getitem__(self, idx: int):
-        record = self.manifest.records[idx]
+        if idx >= len(self.target_res_idx):
+            raise IndexError(f"Index {idx} out of range for target_res_idx (length: {len(self.target_res_idx)})")
+        
+        record = self.manifest.records[0]  # Assuming single record per dataset
         input_data = load_input(
             record=record,
             target_dir=self.target_dir,
@@ -58,13 +65,19 @@ class NCAA_PredictionDataset(PredictionDataset):
             constraints_dir=self.constraints_dir, # protein-protein complex prediction has empty constraints, need add extra constraints for ligand
             template_dir=self.template_dir,
             extra_mols_dir=self.extra_mols_dir,
-            affinity=True,
+            affinity=False, # FIXME
         ) # normal protein-peptide input_data
         
-        assert len(self.target_res_idx) > idx
         # extract k-mer residues from peptide chain and tokenize as ligand
-        tokenized, contact_constraints = self.tokenizer.NCAA_tokenize(input_data, res_id=self.target_res_idx[idx], tokenize_res_window=self.tokenize_res_window,
-                                                trunk_coords=self.trunk_coords)
+        try:
+            tokenized, contact_constraints = self.tokenizer.NCAA_tokenize(
+                input_data, 
+                res_id=self.target_res_idx[idx], 
+                tokenize_res_window=self.tokenize_res_window,
+                trunk_coords=self.trunk_coords
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to tokenize residue {self.target_res_idx[idx]} (index {idx}): {e}") from e
         tokenized = self.cropper.crop(
             tokenized, max_tokens=self.max_tokens, max_atoms=self.max_atoms
         )
@@ -91,7 +104,7 @@ class NCAA_PredictionDataset(PredictionDataset):
             single_sequence_prop=0.0,
             compute_frames=True,
             inference_pocket_constraints=pocket_constraints,
-            inference_contact_constraints=contact_constraints if contact_constraints else None,
+            inference_contact_constraints=contact_constraints if contact_constraints else [],
             compute_constraint_features=True,
             override_method=self.override_method,
             compute_affinity=self.affinity,

@@ -92,6 +92,7 @@ def run_trajectory_affinity(
     Returns a DataFrame with affinity metrics per step.
     """
     # ---- one-time init / models (reuse across steps) ----
+
     init_env(cfg)
     ccd = load_ccd(cfg.mol_dir, cfg.boltz2)
 
@@ -124,6 +125,9 @@ def run_trajectory_affinity(
 
         # Prepare step-specific YAML
         step_yaml = tmp_yaml_dir / f"step_{step}.yaml"
+        # Note: Remove the existence check if you want to reprocess steps
+        # if step_yaml.exists():
+        #     continue
         _render_yaml_with_binder(yaml_template, step_yaml, binder_seq)
 
         # Preprocess for this YAML (manifest/processed)
@@ -176,12 +180,22 @@ def run_trajectory_affinity(
 
         # -- AFFINITY (residue sweep) --
         # Adjust sweep range based on actual binder length
+        # If residue_min/max are set, use them; otherwise scan all residues
         binder_len = len(binder_seq)
-        start_idx = max(1, cfg.residue_min)
-        end_idx = min(binder_len, cfg.residue_max)
+        if cfg.residue_min <= 0 or cfg.residue_max <= 0:
+            # Auto-detect: scan all residues
+            start_idx = 1
+            end_idx = binder_len
+            print(f"[INFO] Step {step}: Auto-scanning all {binder_len} residues (1-{binder_len})")
+        else:
+            start_idx = max(1, cfg.residue_min)
+            end_idx = min(binder_len, cfg.residue_max)
+        
         if start_idx > end_idx:
-            print(f"[WARN] Binder length {binder_len} shorter than residue_min={cfg.residue_min}; skipping step {step}.")
+            print(f"[WARN] Step {step}: Binder length {binder_len} shorter than residue_min={cfg.residue_min}; skipping step.")
             continue
+
+        print(f"[INFO] Step {step}: Processing residues {start_idx} to {end_idx} (total: {end_idx - start_idx + 1})")
 
         # Make a shallow copy of cfg for per-step overrides
         from dataclasses import replace as dataclass_replace
@@ -189,21 +203,27 @@ def run_trajectory_affinity(
 
         # Run affinity prediction using NCAA dataset/loader
         # This will use trunk_coords from dict_out['coords'] for each residue
-        results = pred_res_affinity_once(
-            cfg=cfg_step,
-            processed=processed,
-            feats=feats,
-            dict_out=dict_out,
-            model_struct=model_struct,
-            model_aff=model_aff,
-            device=device,
-            save_structure=False,  # Set to True if you want to save intermediate structures
-        )
+        try:
+            results = pred_res_affinity_once(
+                cfg=cfg_step,
+                processed=processed,
+                feats=feats,
+                dict_out=dict_out,
+                model_struct=model_struct,
+                model_aff=model_aff,
+                device=device,
+                save_structure=False,  # Set to True if you want to save intermediate structures
+            )
+        except Exception as e:
+            print(f"[ERROR] Step {step}: Affinity prediction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            continue  # Skip this step and continue with next
 
         # Detach/cpu for saving
         def _cpu_detach(obj):
             if isinstance(obj, torch.Tensor):
-                return obj.detach().cpu()
+                return obj.detach().cpu().numpy()
             if isinstance(obj, dict):
                 return {k: _cpu_detach(v) for k, v in obj.items()}
             if isinstance(obj, list):
@@ -221,36 +241,48 @@ def run_trajectory_affinity(
 
         # Summarize affinity over residues
         # Record per-residue mean values for affinity predictions
+        expected_residues = set(range(start_idx, end_idx + 1))
+        processed_residues = set(results_cpu.keys())
+        missing_residues = expected_residues - processed_residues
+        
+        if missing_residues:
+            print(f"[WARN] Step {step}: Missing predictions for residues: {sorted(missing_residues)}")
+            print(f"[WARN] Step {step}: Expected {len(expected_residues)} residues, got {len(processed_residues)}")
+        
         for ridx, vals in results_cpu.items():
-            # Handle tensor values - extract mean if tensor, otherwise use as-is
-            affinity_val = vals["affinity_pred_value"]
-            affinity_prob = vals["affinity_probability_binary"]
-            
-            if isinstance(affinity_val, torch.Tensor):
-                affinity_val_mean = float(affinity_val.mean().item())
-            elif isinstance(affinity_val, (list, np.ndarray)):
-                affinity_val_mean = float(np.mean(affinity_val))
-            else:
-                affinity_val_mean = float(affinity_val)
-            
-            if isinstance(affinity_prob, torch.Tensor):
-                affinity_prob_mean = float(affinity_prob.mean().item())
-            elif isinstance(affinity_prob, (list, np.ndarray)):
-                affinity_prob_mean = float(np.mean(affinity_prob))
-            else:
-                affinity_prob_mean = float(affinity_prob)
-            
-            row_out = {
-                "step": step,
-                "binder_seq": binder_seq,
-                "res_idx": int(ridx),
-                "affinity_pred_value_mean": affinity_val_mean,
-                "affinity_probability_binary_mean": affinity_prob_mean,
-                "iptm_logged": float(row.get("iptm", np.nan)) if not pd.isna(row.get("iptm", np.nan)) else np.nan,
-                "mean_plddt_logged": float(row.get("mean_plddt", np.nan)) if not pd.isna(row.get("mean_plddt", np.nan)) else np.nan,
-                "mean_pae_logged": float(row.get("mean_pae", np.nan)) if not pd.isna(row.get("mean_pae", np.nan)) else np.nan,
-            }
-            result_rows.append(row_out)
+            try:
+                # Handle tensor values - extract mean if tensor, otherwise use as-is
+                affinity_val = vals["affinity_pred_value"]
+                affinity_prob = vals["affinity_probability_binary"]
+                
+                if isinstance(affinity_val, torch.Tensor):
+                    affinity_val_mean = float(affinity_val.mean().item())
+                elif isinstance(affinity_val, (list, np.ndarray)):
+                    affinity_val_mean = float(np.mean(affinity_val))
+                else:
+                    affinity_val_mean = float(affinity_val)
+                
+                if isinstance(affinity_prob, torch.Tensor):
+                    affinity_prob_mean = float(affinity_prob.mean().item())
+                elif isinstance(affinity_prob, (list, np.ndarray)):
+                    affinity_prob_mean = float(np.mean(affinity_prob))
+                else:
+                    affinity_prob_mean = float(affinity_prob)
+                
+                row_out = {
+                    "step": step,
+                    "binder_seq": binder_seq,
+                    "res_idx": int(ridx),
+                    "affinity_pred_value_mean": affinity_val_mean,
+                    "affinity_probability_binary_mean": affinity_prob_mean,
+                    "iptm_logged": float(row.get("iptm", np.nan)) if not pd.isna(row.get("iptm", np.nan)) else np.nan,
+                    "mean_plddt_logged": float(row.get("mean_plddt", np.nan)) if not pd.isna(row.get("mean_plddt", np.nan)) else np.nan,
+                    "mean_pae_logged": float(row.get("mean_pae", np.nan)) if not pd.isna(row.get("mean_pae", np.nan)) else np.nan,
+                }
+                result_rows.append(row_out)
+            except Exception as e:
+                print(f"[ERROR] Step {step}, Residue {ridx}: Failed to process results: {e}")
+                continue
 
     # Final table
     if not result_rows:
@@ -263,4 +295,29 @@ def run_trajectory_affinity(
     csv_path = cfg.out_dir / "trajectory_affinity_summary.csv"
     out_df.to_csv(csv_path, index=False)
     print(f"[INFO] Trajectory affinity summary saved to: {csv_path}")
+    
+    # Write comprehensive PKL file with all results
+    pkl_path = cfg.out_dir / "trajectory_affinity_all_results.pkl"
+    all_results = {
+        "summary_df": out_df,
+        "steps_processed": sorted(out_df["step"].unique().tolist()) if not out_df.empty else [],
+        "total_steps": len(df),
+        "total_residue_predictions": len(out_df),
+    }
+    with open(pkl_path, "wb") as f:
+        pickle.dump(all_results, f)
+    print(f"[INFO] Complete results saved to: {pkl_path}")
+    
+    # Print summary statistics
+    if not out_df.empty:
+        steps_processed = out_df["step"].nunique()
+        residues_per_step = out_df.groupby("step")["res_idx"].count()
+        print(f"\n[SUMMARY]")
+        print(f"  Steps processed: {steps_processed}/{len(df)}")
+        print(f"  Total residue predictions: {len(out_df)}")
+        print(f"  Residues per step (min/max/mean): {residues_per_step.min()}/{residues_per_step.max()}/{residues_per_step.mean():.1f}")
+        if residues_per_step.nunique() > 1:
+            print(f"  [WARN] Inconsistent residue counts across steps!")
+            print(f"  Residue counts per step: {residues_per_step.to_dict()}")
+    
     return out_df

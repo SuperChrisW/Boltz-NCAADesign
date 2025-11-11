@@ -61,10 +61,19 @@ def pred_res_affinity_once(
     N_atom, N_token = feats["atom_to_token"][atom_mask.bool(), ...].shape
 
     # Prepare list of target residue indices (1-based)
+    # Ensure we have valid residue range (should be set by caller if auto-detect was needed)
+    if cfg.residue_min < 1 or cfg.residue_max < 1:
+        raise ValueError(f"Invalid residue range: residue_min={cfg.residue_min}, residue_max={cfg.residue_max}. Both must be >= 1.")
+    
     if cfg.residue_min == cfg.residue_max:
         target_res_list = [cfg.residue_min]
     else:
         target_res_list = list(range(cfg.residue_min, cfg.residue_max + 1))
+    
+    if len(target_res_list) == 0:
+        raise ValueError(f"Empty residue range: residue_min={cfg.residue_min}, residue_max={cfg.residue_max}")
+    
+    print(f"[INFO] Affinity prediction: Processing {len(target_res_list)} residues: {target_res_list[0]} to {target_res_list[-1]}")
 
     # Prepare full coordinates array for dataset construction
     num_samples = dict_out['coords'].shape[0]
@@ -100,73 +109,90 @@ def pred_res_affinity_once(
 
     # ---------- Main per-residue loop ----------
     for i, batch_ncaa in enumerate(loader):
-        # 1. Determine 1-based target residue index and (potential) window
-        target_res_idx = target_res_list[i]
-        if cfg.tokenize_res_window == 0:
-            target_res_window = np.array([target_res_idx])  # single residue (1-based)
-        else:
-            window_start = max(1, target_res_idx - cfg.tokenize_res_window)
-            window_end = target_res_idx + cfg.tokenize_res_window + 1  # inclusive
-            target_res_window = np.arange(window_start, window_end)
-        print("target_res_idx (1-based):", target_res_idx, "target_res_window (1-based):", target_res_window, "index:", i)
+        try:
+            # 1. Determine 1-based target residue index and (potential) window
+            if i >= len(target_res_list):
+                print(f"[WARN] Dataset returned more batches ({i+1}) than expected residues ({len(target_res_list)}). Stopping.")
+                break
+            
+            target_res_idx = target_res_list[i]
+            if cfg.tokenize_res_window == 0:
+                target_res_window = np.array([target_res_idx])  # single residue (1-based)
+            else:
+                window_start = max(1, target_res_idx - cfg.tokenize_res_window)
+                window_end = target_res_idx + cfg.tokenize_res_window + 1  # inclusive
+                target_res_window = np.arange(window_start, window_end)
+            print(f"[INFO] Processing residue {target_res_idx}/{target_res_list[-1]} (window: {target_res_window}, batch_idx: {i})")
 
-        # 2. Compute padded/dropped coords and atom mask for this target/region
-        padded_coords, dropped_coords, kept_atom_mask = build_padded_coords(
-            feats, dict_out, batch_ncaa, N_token, target_res_window
-        )
-        batch_ncaa = transfer_batch_to_device(batch_ncaa, device, i)
-        padded_coords.to(device)
-        pad_size = batch_ncaa["token_to_rep_atom"].shape[-1] - dropped_coords.shape[1]
+            # 2. Compute padded/dropped coords and atom mask for this target/region
+            padded_coords, dropped_coords, kept_atom_mask = build_padded_coords(
+                feats, dict_out, batch_ncaa, N_token, target_res_window
+            )
+            batch_ncaa = transfer_batch_to_device(batch_ncaa, device, i)
+            padded_coords = padded_coords.to(device)
+            pad_size = batch_ncaa["token_to_rep_atom"].shape[-1] - dropped_coords.shape[1]
 
-        # 3. Compose paths and convert necessary objects for saving
-        record = batch_ncaa["record"][0]
-        struct_npz = processed.targets_dir / f"{record.id}.npz"
-        clipped_pdb = processed.template_dir / f"{record.id}_clipped_res{target_res_idx}.pdb"
+            # 3. Compose paths and convert necessary objects for saving
+            record = batch_ncaa["record"][0]
+            struct_npz = processed.targets_dir / f"{record.id}.npz"
+            clipped_pdb = processed.template_dir / f"{record.id}_clipped_res{target_res_idx}.pdb"
 
-        kept_mask_np = kept_atom_mask.detach().cpu().numpy()
-        dropped_coords_np = dropped_coords.detach().cpu().numpy()
+            kept_mask_np = kept_atom_mask.detach().cpu().numpy()
+            dropped_coords_np = dropped_coords.detach().cpu().numpy()
 
-        # 4. Save clipped structure if requested
-        if save_structure:
-            save_clipped_structure(
-                struct_path=struct_npz,
-                out_pdb_path=clipped_pdb,
-                kept_atom_mask=kept_mask_np,
-                clipped_coords=dropped_coords_np,
-                boltz2=True,
+            # 4. Save clipped structure if requested
+            if save_structure:
+                save_clipped_structure(
+                    struct_path=struct_npz,
+                    out_pdb_path=clipped_pdb,
+                    kept_atom_mask=kept_mask_np,
+                    clipped_coords=dropped_coords_np,
+                    boltz2=True,
+                )
+
+            # 5. Run structure sampling/trunk and (optionally) save output structure
+            out_trunk = trunk_forward(
+                model_struct,
+                batch_ncaa,
+                recycling_steps=cfg.predict_args_affinity["recycling_steps"],
+                num_sampling_steps=cfg.predict_args_affinity["sampling_steps"],
+                diffusion_samples=cfg.predict_args_affinity["diffusion_samples"],
+                max_parallel_samples=cfg.predict_args_affinity["max_parallel_samples"],
+                run_confidence_sequentially=True,
             )
 
-        # 5. Run structure sampling/trunk and (optionally) save output structure
-        out_trunk = trunk_forward(
-            model_struct,
-            batch_ncaa,
-            recycling_steps=cfg.predict_args_affinity["recycling_steps"],
-            num_sampling_steps=cfg.predict_args_affinity["sampling_steps"],
-            diffusion_samples=cfg.predict_args_affinity["diffusion_samples"],
-            max_parallel_samples=cfg.predict_args_affinity["max_parallel_samples"],
-            run_confidence_sequentially=True,
-        )
+            masked_coords = out_trunk["sample_atom_coords"].detach().cpu().numpy()
+            if save_structure:
+                pred_pdb_path = processed.targets_dir / f"{record.id}_pred_res{target_res_idx}.pdb"
+                save_clipped_structure(
+                    struct_path=struct_npz,
+                    out_pdb_path=pred_pdb_path,
+                    kept_atom_mask=kept_mask_np,
+                    clipped_coords=masked_coords[:, :-pad_size, :],
+                    boltz2=True,
+                )
 
-        masked_coords = out_trunk["sample_atom_coords"].detach().cpu().numpy()
-        if save_structure:
-            pred_pdb_path = processed.targets_dir / f"{record.id}_pred_res{target_res_idx}.pdb"
-            save_clipped_structure(
-                struct_path=struct_npz,
-                out_pdb_path=pred_pdb_path,
-                kept_atom_mask=kept_mask_np,
-                clipped_coords=masked_coords[:, :-pad_size, :],
-                boltz2=True,
-            )
+            # Substitute truncated/padded coords into trunk output for affinity head
+            out_trunk["sample_atom_coords"] = padded_coords
 
-        # Substitute truncated/padded coords into trunk output for affinity head
-        out_trunk["sample_atom_coords"] = padded_coords
-
-        # 6. Affinity head (compute affinity probability and value)
-        out_aff = affinity_forward(model_aff, batch_ncaa, out_trunk)
-        results[target_res_idx] = {
-            "affinity_probability_binary": out_aff["affinity_probability_binary"],
-            "affinity_pred_value": out_aff["affinity_pred_value"],
-        }
+            # 6. Affinity head (compute affinity probability and value)
+            out_aff = affinity_forward(model_aff, batch_ncaa, out_trunk)
+            results[target_res_idx] = {
+                "affinity_probability_binary": out_aff["affinity_probability_binary"],
+                "affinity_pred_value": out_aff["affinity_pred_value"],
+            }
+            print(f"[INFO] Successfully processed residue {target_res_idx}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to process residue {target_res_list[i] if i < len(target_res_list) else 'unknown'}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue with next residue instead of stopping
+            continue
 
     # ---------- Done ----------
+    print(f"[INFO] Affinity prediction complete: {len(results)}/{len(target_res_list)} residues processed")
+    if len(results) < len(target_res_list):
+        missing = set(target_res_list) - set(results.keys())
+        print(f"[WARN] Missing predictions for residues: {sorted(missing)}")
     return results

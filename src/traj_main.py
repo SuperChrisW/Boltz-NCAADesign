@@ -4,6 +4,7 @@ from pathlib import Path
 from .config import RunConfig
 from .logging_utils import init_logging
 from .traj_runner import run_trajectory_affinity
+from .paths import ensure_dirs
 
 # Optional config override
 try:
@@ -15,6 +16,11 @@ except Exception:
 def main() -> None:
     logger = init_logging()
     cfg = RunConfig()
+    ensure_dirs(
+        cfg.out_dir, cfg.msa_dir, cfg.records_dir, cfg.structure_dir,
+        cfg.processed_msa_dir, cfg.constraints_dir, cfg.templates_dir,
+        cfg.mols_out_dir, cfg.predictions_dir
+    )
 
     # Apply optional per-user overrides
     if customize_config is not None:
@@ -24,8 +30,13 @@ def main() -> None:
     # Update these paths to match your trajectory file location
     traj_jsonl = Path("/home/lwang/models/BindCraft/BindCraft_fork/IL23_pepBinder2/opt_log_15.jsonl")
     yaml_template = cfg.data_yaml       # use template in cfg
-    every_n = 5                         # run every 5th step
-    max_steps = 60                      # or set an int limit (None for all steps)
+    every_n = 10                         # run every Nth step (1 = all steps)
+    max_steps = None                    # or set an int limit (None for all steps)
+    
+    # Override residue range to scan ALL residues (set to 0 or negative to auto-detect)
+    # If you want specific range, set: cfg.residue_min = 1, cfg.residue_max = <max_length>
+    from dataclasses import replace
+    cfg = replace(cfg, residue_min=0, residue_max=0)  # 0 means auto-detect from sequence length
 
     logger.info("Starting trajectory affinity prediction")
     logger.info("Trajectory file: %s", traj_jsonl)
