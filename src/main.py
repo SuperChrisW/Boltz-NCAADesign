@@ -8,13 +8,14 @@ from .paths import ensure_dirs
 from .preprocess import load_ccd, prepare_inputs
 from .model_loader import (
     init_env, build_processed_inputs, trainer_and_writers,
-    make_model_args, load_structure_model, load_affinity_model
+    make_model_args, load_structure_model, load_affinity_model, create_ligand_template_module,
 )
 from boltz.data.types import Manifest
 from boltz.data.module.inferencev2 import Boltz2InferenceDataModule
 from .run_structure import run_structure_once
 from .run_affinity import pred_res_affinity_once
 from .io_utils import set_record_affinity
+#from .template_constraints import LigandTemplateModule, LigandTemplateLoader
 from .traj_runner import run_trajectory_affinity
 
 def main():
@@ -48,13 +49,21 @@ def main():
         mol_dir=str(cfg.mol_dir), num_workers=2, constraints_dir=processed.constraints_dir,
         template_dir=processed.template_dir, extra_mols_dir=processed.extra_mols_dir, override_method=None,
     )
+    
+    device = torch.device("cuda")
+    '''template_module = create_ligand_template_module(
+        token_z=128,
+        template_dim=128,
+        template_blocks=2,
+        device=device,
+    )'''
 
     # Models + args
     diff, pf, msa_args = make_model_args(cfg)
     model_struct = load_structure_model(cfg, cfg.predict_args_structure, diff, pf, msa_args)
     model_aff = load_affinity_model(cfg, cfg.predict_args_affinity, diff, pf, msa_args)
 
-    device = torch.device("cuda")
+    
     feats, dict_out = run_structure_once(
         model=model_struct, data_module=data_module, device=device,
         recycling_steps=cfg.predict_args_structure["recycling_steps"],
@@ -70,7 +79,7 @@ def main():
     # Per-residue affinity (keeps your original sweep)
     results = pred_res_affinity_once(
         cfg=cfg, processed=processed, feats=feats, dict_out=dict_out,
-        model_struct=model_struct, model_aff=model_aff, device=device,
+        model_struct=model_struct, model_aff=model_aff, device=device, # provide template_module
     )
     logger.info("Residue-wise affinity results: %s", {k: {kk: float(vv.mean().item()) for kk, vv in val.items()} for k, val in results.items()})
 

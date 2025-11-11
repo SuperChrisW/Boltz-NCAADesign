@@ -3,6 +3,8 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from .dataset_ncaa import NCAA_PredictionDataset, make_ncaa_loader, transfer_batch_to_device
+from .template_constraints import LigandTemplateModule, LigandTemplateLoader
+from .model_loader import create_ligand_template_module, load_template_coords
 from .forward import trunk_forward, affinity_forward
 from .io_utils import save_clipped_structure
 
@@ -43,95 +45,128 @@ def build_padded_coords(feats, dict_out, batch_ncaa, N_token, target_res_window:
     padded_coords = F.pad(dropped_coords, pad_size, value=0.0)
     return padded_coords, dropped_coords, kept_atom_mask
 
-def pred_res_affinity_once(*, cfg, processed, feats, dict_out, model_struct, model_aff, device):
+def pred_res_affinity_once(
+    *,
+    cfg,            # RunConfig object containing configuration parameters
+    processed,      # Preprocessed data bundle with manifest, dirs, etc.
+    feats,          # Feature dictionary input for structure/affinity prediction
+    dict_out,       # Output dictionary from trunk_forward/structure model
+    model_struct,   # Structure prediction model (Boltz2 or compatible)
+    model_aff,      # Affinity prediction model (Boltz2 affinity head or compatible)
+    device,         # PyTorch device (e.g., torch.device("cuda"))
+    save_structure: bool = True,
+):
+    # ---------- Preparation ----------
     atom_mask = feats["atom_pad_mask"]
     N_atom, N_token = feats["atom_to_token"][atom_mask.bool(), ...].shape
 
-    # 1-based index list (residue_min and residue_max are 1-based)
+    # Prepare list of target residue indices (1-based)
     if cfg.residue_min == cfg.residue_max:
         target_res_list = [cfg.residue_min]
     else:
         target_res_list = list(range(cfg.residue_min, cfg.residue_max + 1))
 
-    atom_mask = feats["atom_pad_mask"].squeeze(0).bool().cpu().numpy()  # [N_total_atoms] padded at the end
+    # Prepare full coordinates array for dataset construction
     num_samples = dict_out['coords'].shape[0]
     if num_samples > 1 and 'iptm' in dict_out:
         best_sample_idx = torch.argmax(dict_out['iptm']).item()
     else:
         best_sample_idx = 0
     full_coords = dict_out['coords'][best_sample_idx].detach().cpu().numpy()  # [N_unpadded_atoms, 3]
-    
+
+    # Construct dataset/loader for affinity evaluation
     dataset = NCAA_PredictionDataset(
-        manifest=processed.manifest, target_dir=processed.targets_dir, msa_dir=processed.msa_dir, mol_dir=cfg.mol_dir,
-        constraints_dir=processed.constraints_dir, template_dir=processed.template_dir, extra_mols_dir=processed.extra_mols_dir,
-        override_method=None, affinity=True, target_res_idx=target_res_list, tokenize_res_window=cfg.tokenize_res_window, 
-        max_tokens=cfg.affinity_max_tokens, max_atoms=cfg.affinity_max_atoms, trunk_coords=full_coords,
+        manifest=processed.manifest,
+        target_dir=processed.targets_dir,
+        msa_dir=processed.msa_dir,
+        mol_dir=cfg.mol_dir,
+        constraints_dir=processed.constraints_dir,
+        template_dir=processed.template_dir,
+        extra_mols_dir=processed.extra_mols_dir,
+        override_method=None,
+        affinity=True,
+        target_res_idx=target_res_list,
+        tokenize_res_window=cfg.tokenize_res_window,
+        max_tokens=cfg.affinity_max_tokens,
+        max_atoms=cfg.affinity_max_atoms,
+        trunk_coords=full_coords,
     )
     loader = make_ncaa_loader(dataset, batch_size=1, num_workers=2)
 
-    results = {}
+    # Prepare models and result storage
     model_struct.to(device).eval()
     model_aff.to(device).eval()
+    results = {}
 
+    # ---------- Main per-residue loop ----------
     for i, batch_ncaa in enumerate(loader):
-        target_res_idx = target_res_list[i]  # 1-based residue index
-        if cfg.tokenize_res_window==0:
-            target_res_window = np.array([target_res_idx])  # 1-based
+        # 1. Determine 1-based target residue index and (potential) window
+        target_res_idx = target_res_list[i]
+        if cfg.tokenize_res_window == 0:
+            target_res_window = np.array([target_res_idx])  # single residue (1-based)
         else:
-            # Create 1-based window around target residue (inclusive)
-            # Ensure minimum is at least 1 (1-based indexing)
             window_start = max(1, target_res_idx - cfg.tokenize_res_window)
-            window_end = target_res_idx + cfg.tokenize_res_window + 1  # +1 for inclusive end
-            target_res_window = np.array(list(range(window_start, window_end)))
+            window_end = target_res_idx + cfg.tokenize_res_window + 1  # inclusive
+            target_res_window = np.arange(window_start, window_end)
         print("target_res_idx (1-based):", target_res_idx, "target_res_window (1-based):", target_res_window, "index:", i)
 
-        padded_coords, dropped_coords, kept_atom_mask = build_padded_coords(feats, dict_out, batch_ncaa, N_token, target_res_window)
+        # 2. Compute padded/dropped coords and atom mask for this target/region
+        padded_coords, dropped_coords, kept_atom_mask = build_padded_coords(
+            feats, dict_out, batch_ncaa, N_token, target_res_window
+        )
         batch_ncaa = transfer_batch_to_device(batch_ncaa, device, i)
         padded_coords.to(device)
         pad_size = batch_ncaa["token_to_rep_atom"].shape[-1] - dropped_coords.shape[1]
 
-        # save clipped coords
+        # 3. Compose paths and convert necessary objects for saving
         record = batch_ncaa["record"][0]
-        struct_npz = (processed.targets_dir / f"{record.id}.npz")  # same as used elsewhere
+        struct_npz = processed.targets_dir / f"{record.id}.npz"
         clipped_pdb = processed.template_dir / f"{record.id}_clipped_res{target_res_idx}.pdb"
 
-        # Convert tensors to numpy
         kept_mask_np = kept_atom_mask.detach().cpu().numpy()
-        dropped_coords_np = dropped_coords.detach().cpu().numpy()  # [K, N_kept, 3] or [N_kept, 3]
+        dropped_coords_np = dropped_coords.detach().cpu().numpy()
 
-        save_clipped_structure(
-            struct_path=struct_npz,
-            out_pdb_path=clipped_pdb,
-            kept_atom_mask=kept_mask_np,
-            clipped_coords=dropped_coords_np,
-            boltz2=True,
-        )
-        # end
+        # 4. Save clipped structure if requested
+        if save_structure:
+            save_clipped_structure(
+                struct_path=struct_npz,
+                out_pdb_path=clipped_pdb,
+                kept_atom_mask=kept_mask_np,
+                clipped_coords=dropped_coords_np,
+                boltz2=True,
+            )
 
-        #FIXME: batch_ncaa token
+        # 5. Run structure sampling/trunk and (optionally) save output structure
         out_trunk = trunk_forward(
-            model_struct, batch_ncaa,
+            model_struct,
+            batch_ncaa,
             recycling_steps=cfg.predict_args_affinity["recycling_steps"],
             num_sampling_steps=cfg.predict_args_affinity["sampling_steps"],
             diffusion_samples=cfg.predict_args_affinity["diffusion_samples"],
             max_parallel_samples=cfg.predict_args_affinity["max_parallel_samples"],
             run_confidence_sequentially=True,
         )
-        # save prediction protein-ligand strucure for check
-        masked_coords = out_trunk["sample_atom_coords"].detach().cpu().numpy()
-        save_clipped_structure(
-            struct_path=struct_npz,
-            out_pdb_path= processed.targets_dir / f"{record.id}_pred_res{target_res_idx}.pdb",
-            kept_atom_mask=kept_mask_np,
-            clipped_coords=masked_coords[:,:-pad_size,:],
-            boltz2=True,
-        )
-        out_trunk["sample_atom_coords"] = padded_coords
-        out_aff = affinity_forward(model_aff, batch_ncaa, out_trunk)
 
+        masked_coords = out_trunk["sample_atom_coords"].detach().cpu().numpy()
+        if save_structure:
+            pred_pdb_path = processed.targets_dir / f"{record.id}_pred_res{target_res_idx}.pdb"
+            save_clipped_structure(
+                struct_path=struct_npz,
+                out_pdb_path=pred_pdb_path,
+                kept_atom_mask=kept_mask_np,
+                clipped_coords=masked_coords[:, :-pad_size, :],
+                boltz2=True,
+            )
+
+        # Substitute truncated/padded coords into trunk output for affinity head
+        out_trunk["sample_atom_coords"] = padded_coords
+
+        # 6. Affinity head (compute affinity probability and value)
+        out_aff = affinity_forward(model_aff, batch_ncaa, out_trunk)
         results[target_res_idx] = {
             "affinity_probability_binary": out_aff["affinity_probability_binary"],
             "affinity_pred_value": out_aff["affinity_pred_value"],
         }
 
+    # ---------- Done ----------
     return results

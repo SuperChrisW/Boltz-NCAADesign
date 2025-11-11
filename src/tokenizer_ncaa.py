@@ -96,18 +96,19 @@ class NCAA_Tokenizer(Boltz2Tokenizer):
                 ligand_chain_asym_id=1,    # FIXME: should be configurable
                 ligand_res_indices=ligand_res_indices,
                 max_distance=3.5,
-                force=True,
+                force=False,
             )
 
         # Templates (unchanged)
-        if input_data.templates is not None:
+        '''if input_data.templates is not None:
             template_tokens, template_bonds = {}, {}
             for tmpl_id, tmpl in input_data.templates.items():
                 td, tb = tokenize_structure(tmpl)
                 template_tokens[tmpl_id] = td
                 template_bonds[tmpl_id] = tb
         else:
-            template_tokens = template_bonds = None
+            pass'''
+        template_tokens = template_bonds = None
 
         return Tokenized(
             tokens=token_data, # New
@@ -116,7 +117,7 @@ class NCAA_Tokenizer(Boltz2Tokenizer):
             msa={}, #FIXME:
             record= record, # New
             residue_constraints=residue_constraints, # New
-            templates=input_data.templates, #FIXME:
+            templates=None, #FIXME:
             template_tokens=template_tokens, #FIXME:
             template_bonds=template_bonds, #FIXME:
             extra_mols=input_data.extra_mols, #FIXME:

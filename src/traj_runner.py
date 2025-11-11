@@ -170,10 +170,12 @@ def run_trajectory_affinity(
             structure_dir=cfg.structure_dir,
             logger=None,
         )
+        
+        # Set affinity flag on record for ligand chain (chain_id=1 is the binder/ligand)
         processed.manifest.records[0] = set_record_affinity(processed.manifest.records[0], chain_id=1)
 
         # -- AFFINITY (residue sweep) --
-        # adjust sweep range based on actual binder length
+        # Adjust sweep range based on actual binder length
         binder_len = len(binder_seq)
         start_idx = max(1, cfg.residue_min)
         end_idx = min(binder_len, cfg.residue_max)
@@ -181,10 +183,12 @@ def run_trajectory_affinity(
             print(f"[WARN] Binder length {binder_len} shorter than residue_min={cfg.residue_min}; skipping step {step}.")
             continue
 
-        # make a shallow copy of cfg for per-step overrides
+        # Make a shallow copy of cfg for per-step overrides
         from dataclasses import replace as dataclass_replace
         cfg_step = dataclass_replace(cfg, residue_min=start_idx, residue_max=end_idx)
 
+        # Run affinity prediction using NCAA dataset/loader
+        # This will use trunk_coords from dict_out['coords'] for each residue
         results = pred_res_affinity_once(
             cfg=cfg_step,
             processed=processed,
@@ -193,6 +197,7 @@ def run_trajectory_affinity(
             model_struct=model_struct,
             model_aff=model_aff,
             device=device,
+            save_structure=False,  # Set to True if you want to save intermediate structures
         )
 
         # Detach/cpu for saving
@@ -214,15 +219,33 @@ def run_trajectory_affinity(
         with open(cfg.out_dir / f"affinity_out_step{step}.pkl", "wb") as f:
             pickle.dump(results_cpu, f)
 
-        # Summarize affinity over residues (you can customize how you aggregate)
-        # Here we record per-residue mean values.
+        # Summarize affinity over residues
+        # Record per-residue mean values for affinity predictions
         for ridx, vals in results_cpu.items():
+            # Handle tensor values - extract mean if tensor, otherwise use as-is
+            affinity_val = vals["affinity_pred_value"]
+            affinity_prob = vals["affinity_probability_binary"]
+            
+            if isinstance(affinity_val, torch.Tensor):
+                affinity_val_mean = float(affinity_val.mean().item())
+            elif isinstance(affinity_val, (list, np.ndarray)):
+                affinity_val_mean = float(np.mean(affinity_val))
+            else:
+                affinity_val_mean = float(affinity_val)
+            
+            if isinstance(affinity_prob, torch.Tensor):
+                affinity_prob_mean = float(affinity_prob.mean().item())
+            elif isinstance(affinity_prob, (list, np.ndarray)):
+                affinity_prob_mean = float(np.mean(affinity_prob))
+            else:
+                affinity_prob_mean = float(affinity_prob)
+            
             row_out = {
                 "step": step,
                 "binder_seq": binder_seq,
                 "res_idx": int(ridx),
-                "affinity_pred_value_mean": float(vals["affinity_pred_value"].mean().item()),
-                "affinity_probability_binary_mean": float(vals["affinity_probability_binary"].mean().item()),
+                "affinity_pred_value_mean": affinity_val_mean,
+                "affinity_probability_binary_mean": affinity_prob_mean,
                 "iptm_logged": float(row.get("iptm", np.nan)) if not pd.isna(row.get("iptm", np.nan)) else np.nan,
                 "mean_plddt_logged": float(row.get("mean_plddt", np.nan)) if not pd.isna(row.get("mean_plddt", np.nan)) else np.nan,
                 "mean_pae_logged": float(row.get("mean_pae", np.nan)) if not pd.isna(row.get("mean_pae", np.nan)) else np.nan,
@@ -230,8 +253,14 @@ def run_trajectory_affinity(
             result_rows.append(row_out)
 
     # Final table
+    if not result_rows:
+        print("[WARN] No results collected. Returning empty DataFrame.")
+        return pd.DataFrame()
+    
     out_df = pd.DataFrame(result_rows).sort_values(["step", "res_idx"]).reset_index(drop=True)
 
     # Write CSV
-    out_df.to_csv(cfg.out_dir / "trajectory_affinity_summary.csv", index=False)
+    csv_path = cfg.out_dir / "trajectory_affinity_summary.csv"
+    out_df.to_csv(csv_path, index=False)
+    print(f"[INFO] Trajectory affinity summary saved to: {csv_path}")
     return out_df
