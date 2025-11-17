@@ -1,7 +1,7 @@
 # affinity_eval/main.py
 from __future__ import annotations
 from pathlib import Path
-from .config import RunConfig
+from .config import load_run_config
 from .logging_utils import init_logging
 from .traj_runner import run_trajectory_affinity
 from .paths import ensure_dirs
@@ -15,7 +15,7 @@ except Exception:
 
 def main() -> None:
     logger = init_logging()
-    cfg = RunConfig()
+    cfg = load_run_config()
     ensure_dirs(
         cfg.out_dir, cfg.msa_dir, cfg.records_dir, cfg.structure_dir,
         cfg.processed_msa_dir, cfg.constraints_dir, cfg.templates_dir,
@@ -28,13 +28,11 @@ def main() -> None:
 
     # ---- Fixed trajectory parameters ----
     # Update these paths to match your trajectory file location
-    traj_jsonl = Path("/home/lwang/models/BindCraft/BindCraft_fork/IL23_pepBinder2/opt_log_15.jsonl")
+    traj_jsonl = Path("/home/lwang/models/boltz_inference/scripts/affinity_eval/test/BindCraft_traj/designs/DerF21/opt_log_l15.jsonl")
     yaml_template = cfg.data_yaml       # use template in cfg
-    every_n = 10                         # run every Nth step (1 = all steps)
-    max_steps = None                    # or set an int limit (None for all steps)
+    every_n = 2                         # run every Nth step (1 = all steps)
+    max_steps = 100                    # or set an int limit (None for all steps)
     
-    # Override residue range to scan ALL residues (set to 0 or negative to auto-detect)
-    # If you want specific range, set: cfg.residue_min = 1, cfg.residue_max = <max_length>
     from dataclasses import replace
     cfg = replace(cfg, residue_min=0, residue_max=0)  # 0 means auto-detect from sequence length
 

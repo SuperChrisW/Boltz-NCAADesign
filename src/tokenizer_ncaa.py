@@ -60,7 +60,10 @@ class NCAA_Tokenizer(Boltz2Tokenizer):
 
     def NCAA_tokenize(self, input_data, res_id: int, tokenize_res_window: int, trunk_coords: np.ndarray = None):
         lig_chain = input_data.structure.chains[1]       # FIXME: extract the protein receptor chains. put ligand chain at the end
-
+        # Monitor key variables before calling atomize_residues
+        import logging
+        logging.debug(f"NCAA_tokenize inputs: res_id={res_id}, tokenize_res_window={tokenize_res_window}, trunk_coords shape={trunk_coords.shape if trunk_coords is not None else None}")
+        logging.debug(f"lig_chain.id={getattr(lig_chain, 'id', None)}; input_data.structure chains={[getattr(chain, 'id', None) for chain in input_data.structure.chains]}")
         (
             token_data,
             token_bonds,
@@ -87,6 +90,7 @@ class NCAA_Tokenizer(Boltz2Tokenizer):
                 window_end = res_id + tokenize_res_window + 1
                 ligand_res_indices = np.array(list(range(window_start, window_end)))
             
+            # TODO: temporaily remove contact constraints generation
             contact_constraints = generate_contact_constraints_token_based(
                 trunk_coords=trunk_coords,
                 structure=input_data.structure,
@@ -99,15 +103,6 @@ class NCAA_Tokenizer(Boltz2Tokenizer):
                 force=False,
             )
 
-        # Templates (unchanged)
-        '''if input_data.templates is not None:
-            template_tokens, template_bonds = {}, {}
-            for tmpl_id, tmpl in input_data.templates.items():
-                td, tb = tokenize_structure(tmpl)
-                template_tokens[tmpl_id] = td
-                template_bonds[tmpl_id] = tb
-        else:
-            pass'''
         template_tokens = template_bonds = None
 
         return Tokenized(
@@ -541,7 +536,17 @@ class NCAA_Tokenizer(Boltz2Tokenizer):
         # ========================================================================
         residue_constraints = add_constraints(parsed_lig, lig_asym_id, glob_idx_map, local_to_global_res_idx)
         record = create_metadata(target, chains, lig_asym_id)
+        
+        # Add intra-residue bonds (within each residue)
         token_bonds, bond_data = add_bonds(parsed_lig, lig_asym_id, glob_idx_map, atom_to_token, local_to_global_res_idx)
+        
+        # Add inter-residue peptide bonds (C-N bonds between consecutive residues)
+        if len(parsed_lig) > 1:
+            peptide_token_bonds, peptide_bond_data = add_peptide_bonds(
+                parsed_lig, lig_asym_id, glob_idx_map, atom_to_token, local_to_global_res_idx
+            )
+            token_bonds.extend(peptide_token_bonds)
+            bond_data.extend(peptide_bond_data)
         
         # Convert atom_data_raw to AtomV2 format: (name, coords, is_present, bfactor, plddt)
         atom_data = [
@@ -612,6 +617,97 @@ def add_bonds(parsed_res: list[ParsedResidue], lig_asym_id, glob_idx_map: dict, 
             else:
                 print(f"Warning: Parsed atom indices {parsed_atom_1} or {parsed_atom_2} not found in parsed_atom_idx_to_global for residue {local_res_idx} (global: {glob_res_idx})")
 
+    return token_bonds, bond_data
+
+def add_peptide_bonds(
+    parsed_res: list[ParsedResidue], 
+    lig_asym_id: int, 
+    glob_idx_map: dict, 
+    atom_to_token: dict, 
+    local_to_global_res_idx: dict
+) -> tuple[list, list]:
+    """
+    Add explicit C-N peptide bonds between consecutive residues.
+    
+    For each pair of consecutive residues (i, i+1):
+    - Connects C atom of residue i to N atom of residue i+1
+    - Assumes amino acid backbone template with N, CA, C, O atoms
+    
+    Parameters
+    ----------
+    parsed_res : list[ParsedResidue]
+        List of parsed residues in sequential order
+    lig_asym_id : int
+        Ligand chain asymmetric ID
+    glob_idx_map : dict
+        Mapping from (chain_asym_id, res_idx, atom_name) -> global_atom_idx
+    atom_to_token : dict
+        Mapping from global_atom_idx -> token_idx
+    local_to_global_res_idx : dict
+        Mapping from local_res_idx -> global_res_idx
+    
+    Returns
+    -------
+    tuple[list, list]
+        (token_bonds, bond_data) - additional bonds to add
+    """
+    token_bonds = []
+    bond_data = []
+    
+    # Use SINGLE bond type for peptide bonds
+    peptide_bond_type = const.bond_type_ids["SINGLE"]
+    
+    # Iterate through consecutive residue pairs
+    for i in range(len(parsed_res) - 1):
+        res_i = parsed_res[i]
+        res_i_plus_1 = parsed_res[i + 1]
+        
+        local_res_idx_i = res_i.idx
+        local_res_idx_i_plus_1 = res_i_plus_1.idx
+        glob_res_idx_i = local_to_global_res_idx[local_res_idx_i]
+        glob_res_idx_i_plus_1 = local_to_global_res_idx[local_res_idx_i_plus_1]
+        
+        # Find C atom in residue i
+        c_atom_name = "C"
+        c_key = (lig_asym_id, glob_res_idx_i, c_atom_name)
+        
+        # Find N atom in residue i+1
+        n_atom_name = "N"
+        n_key = (lig_asym_id, glob_res_idx_i_plus_1, n_atom_name)
+        
+        # Check if both atoms exist
+        if c_key in glob_idx_map and n_key in glob_idx_map:
+            global_atom_c = glob_idx_map[c_key]
+            global_atom_n = glob_idx_map[n_key]
+            
+            # Add to bond_data (for StructureV2)
+            bond_data.append(
+                (
+                    lig_asym_id,
+                    lig_asym_id,
+                    local_res_idx_i,  # res_1 (local index)
+                    local_res_idx_i_plus_1,  # res_2 (local index)
+                    global_atom_c,  # atom_1 (C from residue i)
+                    global_atom_n,  # atom_2 (N from residue i+1)
+                    peptide_bond_type,
+                )
+            )
+            
+            # Add to token_bonds (for Tokenized)
+            if global_atom_c in atom_to_token and global_atom_n in atom_to_token:
+                token_c = atom_to_token[global_atom_c]
+                token_n = atom_to_token[global_atom_n]
+                token_bonds.append((token_c, token_n, peptide_bond_type))
+            else:
+                print(f"Warning: Global atom indices {global_atom_c} (C) or {global_atom_n} (N) not found in atom_to_token for peptide bond between residues {local_res_idx_i} and {local_res_idx_i_plus_1}")
+        else:
+            missing_atoms = []
+            if c_key not in glob_idx_map:
+                missing_atoms.append(f"C in residue {local_res_idx_i}")
+            if n_key not in glob_idx_map:
+                missing_atoms.append(f"N in residue {local_res_idx_i_plus_1}")
+            print(f"Warning: Cannot create peptide bond between residues {local_res_idx_i} and {local_res_idx_i_plus_1}: missing {', '.join(missing_atoms)}")
+    
     return token_bonds, bond_data
 
 def add_constraints(parsed_res: list[ParsedResidue], lig_asym_id, glob_idx_map: dict, local_to_global_res_idx: dict):

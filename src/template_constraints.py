@@ -30,8 +30,8 @@ class LigandTemplateModule(nn.Module):
 
     def __init__(
         self,
-        token_z: int,
-        template_dim: int = 128,
+        token_z: int=128,
+        template_dim: int = 64,
         template_blocks: int = 2,
         dropout: float = 0.25,
         pairwise_head_width: int = 32,
@@ -39,8 +39,8 @@ class LigandTemplateModule(nn.Module):
         post_layer_norm: bool = False,
         activation_checkpointing: bool = False,
         min_dist: float = 2.0,
-        max_dist: float = 20.0,
-        num_bins: int = 38,
+        max_dist: float = 22.0,
+        num_bins: int = 64,
         use_kernels: bool = False,
     ) -> None:
         """
@@ -363,10 +363,20 @@ class LigandTemplateModule(nn.Module):
         protein_coords_mapped = protein_coords[:n_prot_coords].to(z.device)
         ligand_coords_mapped = ligand_coords[:n_lig_coords].to(z.device)
         
+        # Map masks if available
+        protein_mask_mapped = None
+        ligand_mask_mapped = None
+        if protein_mask is not None:
+            protein_mask_mapped = protein_mask[:n_prot_coords].to(z.device)
+        if ligand_mask is not None:
+            ligand_mask_mapped = ligand_mask[:n_lig_coords].to(z.device)
+        
         # Compute template features
         template_features = self.compute_template_features(
             protein_coords_mapped,
             ligand_coords_mapped,
+            protein_mask=protein_mask_mapped,
+            ligand_mask=ligand_mask_mapped,
             device=z.device,
         )  # [n_prot_coords, n_lig_coords, template_dim]
         
@@ -404,11 +414,8 @@ class LigandTemplateModule(nn.Module):
         # Add template features to projected z
         v = z_proj + template_features_expanded * prot_lig_mask  # [B, N, N, template_dim]
         
-        # Process through pairformer
-        v_reshaped = v.view(B * N, N, template_features.shape[-1])
-        pair_mask_reshaped = pair_mask.view(B * N, N)
-        v_reshaped = v_reshaped + self.pairformer(v_reshaped, pair_mask_reshaped, use_kernels=use_kernels)
-        v = v_reshaped.view(B, N, N, template_features.shape[-1])
+        # Process through pairformer (expects [B, N, N, D] and [B, N, N])
+        v = v + self.pairformer(v, pair_mask, use_kernels=use_kernels)
         v = self.v_norm(v)
         
         # Project back to token_z space

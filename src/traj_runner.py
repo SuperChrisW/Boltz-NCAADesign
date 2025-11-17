@@ -14,7 +14,7 @@ from .config import RunConfig
 from .preprocess import load_ccd, prepare_inputs
 from .model_loader import (
     init_env, build_processed_inputs, make_model_args,
-    load_structure_model, load_affinity_model,
+    load_structure_model, load_affinity_model, create_ligand_template_module,
 )
 from .run_structure import run_structure_once
 from .run_affinity import pred_res_affinity_once
@@ -109,6 +109,8 @@ def run_trajectory_affinity(
     diff, pf, msa_args = make_model_args(cfg)
     model_struct = load_structure_model(cfg, cfg.predict_args_structure, diff, pf, msa_args)
     model_aff = load_affinity_model(cfg, cfg.predict_args_affinity, diff, pf, msa_args)
+    template_module = create_ligand_template_module()
+    #template_module = None
     device = torch.device("cuda")
 
     # Per-step results
@@ -212,6 +214,7 @@ def run_trajectory_affinity(
                 model_struct=model_struct,
                 model_aff=model_aff,
                 device=device,
+                template_module=template_module,
                 save_structure=False,  # Set to True if you want to save intermediate structures
             )
         except Exception as e:
